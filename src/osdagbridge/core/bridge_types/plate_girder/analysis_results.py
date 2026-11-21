@@ -1350,6 +1350,53 @@ class PlateGirderAnalysisResults:
 
         return pd.DataFrame(rows).sort_values("X (m)").reset_index(drop=True)
 
+    def _get_transverse_member_results(
+        self,
+        load_case: str,
+        bmd_key: str = "Mz_i",
+        sfd_key: str = "Vy_i",
+        defl_component: str = "dy",
+    ):
+        """
+        Extract the unified Transverse Members (End Diaphragms + Intermediate
+        Cross Bracings) result series for a load case (Task III).
+
+        All data integration routes through
+        :mod:`osdagbridge.core.bridge_types.plate_girder.results_data`
+        (``extract_transverse_member_results``), operating on the
+        OpenSeesPy/ospgrillage output dictionary stored on the grillage
+        model as ``result_data``.
+
+        Returns
+        -------
+        tuple or None
+            ``(xs, bmd_values, sfd_values, defl_values, all_data)`` —
+            stations in m, forces in kN/kNm, deflections in mm — or ``None``
+            when the restructured result data is unavailable or contains no
+            transverse members.
+        """
+        from osdagbridge.core.bridge_types.plate_girder.results_data import (
+            extract_transverse_member_results,
+        )
+
+        result_data = getattr(self.bridge, "result_data", None)
+        if not result_data:
+            return None
+
+        try:
+            return extract_transverse_member_results(
+                result_data, load_case,
+                bmd_key=bmd_key, sfd_key=sfd_key,
+                defl_component=defl_component,
+            )
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning(
+                "_get_transverse_member_results(lc=%r) failed: %s",
+                load_case, exc, exc_info=True,
+            )
+            return None
+
     def _get_girder_sw_df(self, girder_map, nodes):
         """Internal helper to build the Girder Self weight DataFrame."""
         # 1. Identify magnitudes from bridge case

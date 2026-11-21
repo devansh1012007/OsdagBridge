@@ -5,7 +5,7 @@ Author: Arushi
 """
 
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QSplitter, QScrollArea, QHBoxLayout, QPushButton, QLabel
-from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve, Signal
 from .cad_cross_section import CrossSectionCADWidget
 from .cad_top_view import TopViewCADWidget
 from osdagbridge.core.utils.common import *
@@ -17,7 +17,14 @@ from osdagbridge.desktop.cad.irc5_geometry import (
 
 class BridgeDualCADWidget(QWidget):
     """Split view widget showing both cross-section and top view with individual controls"""
-    
+
+    # ── Interactive CAD parameter editing (Task I) ─────────────────────
+    # Aggregated from both child CAD views. Emitted as
+    # (input KEY, new value text) after the user commits an inline edit.
+    parameter_edit_requested = Signal(str, str)
+    # Emitted when a locked (derived) dimension label is double-clicked.
+    locked_parameter_clicked = Signal(str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.cross_zoom_level = 1.0
@@ -62,7 +69,7 @@ class BridgeDualCADWidget(QWidget):
         # Create top view scroll area
         self.top_view_widget = TopViewCADWidget(self)
         # self.top_view_widget.setMinimumSize(800, 600)
-        
+
         self.top_scroll = QScrollArea()
         self.top_scroll.setWidget(self.top_view_widget)
         self.top_scroll.setWidgetResizable(True)
@@ -70,6 +77,16 @@ class BridgeDualCADWidget(QWidget):
         self.top_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         
         self.splitter.addWidget(self.top_scroll)
+
+        # ── Interactive CAD parameter editing (Task I) ──────────────────
+        # Only the template-page dual view allows double-click editing; the
+        # Additional Inputs preview keeps its CAD widgets read-only.
+        self.cross_section_widget._set_cad_editing_enabled(True)
+        self.top_view_widget._set_cad_editing_enabled(True)
+        self.cross_section_widget.parameter_edit_requested.connect(self.parameter_edit_requested)
+        self.top_view_widget.parameter_edit_requested.connect(self.parameter_edit_requested)
+        self.cross_section_widget.locked_parameter_clicked.connect(self.locked_parameter_clicked)
+        self.top_view_widget.locked_parameter_clicked.connect(self.locked_parameter_clicked)
         
         # Set equal sizes for both views
         self.splitter.setStretchFactor(0, 1)

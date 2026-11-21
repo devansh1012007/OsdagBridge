@@ -748,7 +748,13 @@ class CustomWindow(QWidget):
                     loadcases = self.backend.get_available_loadcases()
                     nodes, members = self.backend.get_nodes_members()
                     edge_dist = self.backend.get_edge_dist()
-                    self.plots_widget.setup(ds_all, loadcases, nodes, members, edge_dist=edge_dist)
+                    # result_data (restructured OpenSeesPy/ospgrillage output
+                    # dictionary) enables the "Transverse Members" selection
+                    # in the plots view (Task III).
+                    self.plots_widget.setup(
+                        ds_all, loadcases, nodes, members, edge_dist=edge_dist,
+                        result_data=getattr(self.backend, "result_data", None),
+                    )
                     self.plots_widget.link_output_dock(self.output_dock)
 
                     # Render 3D cad using the parameters from Backend
@@ -787,7 +793,131 @@ class CustomWindow(QWidget):
         # Connect to input dock's value changed signals
         # This will update the CAD whenever any input field changes
         if hasattr(self.input_dock, 'input_value_changed'):
-            self.input_dock.input_value_changed.connect(self.update_cad_from_inputs)        
+            self.input_dock.input_value_changed.connect(self.update_cad_from_inputs)
+
+        # ── Interactive CAD parameter editing (Task I) ──────────────────
+        # Double-clicked dimension labels push validated values back into
+        # the main basic/additional input dictionaries and redraw the CAD.
+        self.cad_comp_widget.parameter_edit_requested.connect(self._on_cad_parameter_edit)
+        self.cad_comp_widget.locked_parameter_clicked.connect(self._on_cad_locked_parameter)
+
+    # ── Interactive CAD parameter editing (Task I) ─────────────────────────
+
+    def _on_cad_parameter_edit(self, key: str, text: str):
+        """
+        Validate + commit a value typed into a 2D CAD dimension label.
+
+        Flow (Task I): the CAD widgets emit ``(key, text)`` after the inline
+        editor closes; this slot validates against the same rules as the
+        main input dock, pushes the value to the basic/additional input
+        dictionaries, re-syncs the dock fields and triggers a CAD redraw.
+        Invalid input is rejected with a warning and the label reverts.
+        """
+        from osdagbridge.desktop.ui.docks.cad_param_editor import (
+            validate_cad_param_value,
+            cad_param_label,
+            CAD_EDITABLE_PARAMS,
+        )
+
+        ok, value, message = validate_cad_param_value(
+            key, text, self.input_dict, self._cad_edit_validator()
+        )
+
+        if not ok:
+            CustomMessageBox(
+                title="Invalid CAD Input",
+                text=message,
+                buttons=["OK"],
+                dialogType=MessageBoxType.Warning,
+            ).exec()
+            # Revert the label by redrawing from the unchanged dictionaries.
+            self.update_cad_from_inputs()
+            return
+
+        entry = CAD_EDITABLE_PARAMS[key]
+        label = entry["label"]
+
+        # 1. Push to the main input dictionary (basic + additional keys both
+        #    live here; solve_extend keeps the derived values consistent).
+        self.input_dict[key] = value
+
+        # 2. Re-sync the visible UI fields.
+        self._sync_input_field_widget(key, value)
+
+        # 3. Additional Inputs dialog fields (girder spacing / deck thickness
+        #    belong to the Typical Section tab) — update its working dict so a
+        #    later Save does not clobber the CAD edit with a stale value.
+        if self._additional_inputs_dialog is not None:
+            dlg = self._additional_inputs_dialog
+            if hasattr(dlg, "working_input_dict"):
+                dlg.working_input_dict[key] = value
+                dlg.default_input_dict[key] = value
+            dlg_widget = dlg.findChild(QWidget, key)
+            if dlg_widget is not None and hasattr(dlg_widget, "setText"):
+                dlg_widget.blockSignals(True)
+                dlg_widget.setText(str(value))
+                dlg_widget.blockSignals(False)
+
+        # 4. Derived layout values (overall width / spacing / overhang) must
+        #    be re-solved when a *basic* field changes so locked dimensions
+        #    stay geometrically consistent; spacing/thickness edits skip the
+        #    solver (they ARE the additional inputs).
+        if key in (KEY_SPAN, KEY_CARRIAGEWAY_WIDTH):
+            self.input_dock.is_require_field_changed = True
+            self.update_cad_from_inputs()
+        else:
+            self.cad_comp_widget.update_from_osdag_inputs(self.input_dict)
+
+        bridge_logger.info(
+            f"CAD edit applied: {label} = {value:g} {entry['unit']} "
+            f"(synced to {key})"
+        )
+
+    def _on_cad_locked_parameter(self, key: str):
+        """Inform the user why a derived dimension cannot be CAD-edited."""
+        from osdagbridge.desktop.ui.docks.cad_param_editor import cad_param_label
+
+        label = cad_param_label(key) or str(key)
+        CustomMessageBox(
+            title="Read-Only Dimension",
+            text=(
+                f"'{label}' is a derived value and cannot be edited directly "
+                f"on the CAD view.\n\nEdit the primary inputs (span, "
+                f"carriageway width, girder spacing, deck thickness) instead "
+                f"— the derived dimensions update automatically."
+            ),
+            buttons=["OK"],
+            dialogType=MessageBoxType.Information,
+        ).exec()
+
+    def _cad_edit_validator(self):
+        """Reuse the input dock's validator instance for CAD label edits."""
+        validator = getattr(self.input_dock, "validator", None)
+        if validator is None:
+            from osdagbridge.core.bridge_types.plate_girder.validator import (
+                BridgeInputValidator,
+            )
+            validator = BridgeInputValidator()
+        return validator
+
+    def _sync_input_field_widget(self, key: str, value):
+        """Silently update the input dock widget showing *key*."""
+        if not self.input_dock:
+            return
+        widget = None
+        if self.input_dock.input_widget:
+            widget = self.input_dock.input_widget.findChild(QWidget, key)
+        if widget is None:
+            return
+        if hasattr(widget, "setText"):
+            widget.blockSignals(True)
+            widget.setText(str(value))
+            widget.blockSignals(False)
+        elif hasattr(widget, "setCurrentText"):
+            widget.blockSignals(True)
+            widget.setCurrentText(str(value))
+            widget.blockSignals(False)
+
             
     # Function for saving input dictionary into an OSI file
     def saveOSI_inputs(self):

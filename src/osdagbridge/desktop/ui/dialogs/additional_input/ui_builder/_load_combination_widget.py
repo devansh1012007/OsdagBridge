@@ -412,7 +412,15 @@ class LoadCombinationWidget(QWidget):
                 self.table.setCellWidget(row, 1, cb_container)
 
         self.table.setVisible(True)
-        self._adjust_table_height()   
+        self._adjust_table_height()
 
         if self._ai:
-            self._ai._on_field_edited(self._field_id, self._data)
+            # Programmatic (re)population, not a user edit — suppress the
+            # unsaved-changes flag so the dialog does not open as "modified"
+            # (Task II). Mirrors the blockSignals pattern used by the other
+            # programmatic widget writes.
+            self._ai._suppress_modified = True
+            try:
+                self._ai._on_field_edited(self._field_id, self._data)
+            finally:
+                self._ai._suppress_modified = False

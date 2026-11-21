@@ -28,8 +28,12 @@ from PySide6.QtWebChannel import QWebChannel
 from osdagbridge.core.bridge_types.plate_girder.plots_widget import (
     build_figure_sfd,
     build_figure_bmd,
+    build_figure_transverse_members,
     # build_figure_bmd_contour,  # commented out
     FORCE_MAP,
+)
+from osdagbridge.core.bridge_types.plate_girder.results_data import (
+    TRANSVERSE_MEMBERS_LABEL,
 )
 
 # =========================================================
@@ -156,6 +160,9 @@ class PlotWidget(QWidget):
         self._ds_all = None
         self._nodes = {}
         self._members = {}
+        # Restructured result dictionary — required for the "Transverse
+        # Members" selection (Task III).
+        self._result_data = None
 
         layout = QVBoxLayout(self)
         top = QHBoxLayout()
@@ -165,6 +172,18 @@ class PlotWidget(QWidget):
         self.combo = QComboBox()
         self.combo.currentTextChanged.connect(self.update_plot)
         top.addWidget(self.combo)
+
+        # ---------- MEMBER (Task III: adds Transverse Members) ----------
+        top.addWidget(QLabel("Member:"))
+        self.member_combo = QComboBox()
+        self.member_combo.setToolTip(
+            "'All' plots every longitudinal girder; 'Transverse Members' "
+            "plots the unified End Diaphragms + Intermediate Cross Bracings "
+            "component."
+        )
+        self.member_combo.addItems(["All", TRANSVERSE_MEMBERS_LABEL])
+        self.member_combo.currentTextChanged.connect(self.update_plot)
+        top.addWidget(self.member_combo)
 
         # ---------- FORCE ----------
         top.addWidget(QLabel("Force:"))
@@ -208,11 +227,17 @@ class PlotWidget(QWidget):
         # Inject HTML directly into memory
         self.web.setHtml(HTML_TEMPLATE, QUrl("qrc:/"))
 
-    def setup(self, ds_all, loadcases, nodes, members):
-        """Populate the widget with bridge analysis results. Call after design() completes."""
+    def setup(self, ds_all, loadcases, nodes, members, result_data=None):
+        """Populate the widget with bridge analysis results. Call after design() completes.
+
+        ``result_data`` is the restructured OpenSeesPy/ospgrillage output
+        dictionary; it enables the "Transverse Members" selection whose data
+        extraction routes through results_data.py.
+        """
         self._ds_all = ds_all
         self._nodes = nodes
         self._members = members
+        self._result_data = result_data
 
         self.combo.blockSignals(True)
         self.combo.clear()
@@ -239,6 +264,23 @@ class PlotWidget(QWidget):
 
         loadcase = self.combo.currentText()
         force_key = self.force_combo.currentText()
+
+        # ── Transverse Members selection (Task III) ─────────────────────
+        # End Diaphragms + Intermediate Cross Bracings as a single
+        # component; data extraction routes through results_data.py.
+        if (
+            self.member_combo.currentText() == TRANSVERSE_MEMBERS_LABEL
+            and self._result_data is not None
+            and loadcase
+        ):
+            self.stats_dict = {}
+            plot_json = build_figure_transverse_members(
+                self._result_data, loadcase, force_key,
+                self._nodes, self._members,
+            )
+            self.backend.newPlotData.emit(plot_json)
+            return
+
         ds = self._ds_all.sel(Loadcase=loadcase)
 
         is_force = force_key.startswith("F") 

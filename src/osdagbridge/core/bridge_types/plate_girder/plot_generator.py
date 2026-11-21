@@ -12,6 +12,14 @@ import openseespy.opensees as ops
 from mpl_toolkits.mplot3d.art3d import Line3DCollection
 from mpl_toolkits.mplot3d import proj3d
 from matplotlib.text import Annotation
+
+from osdagbridge.core.bridge_types.plate_girder.results_data import (
+    TRANSVERSE_MEMBERS_LABEL,
+    END_DIAPHRAGM_LABEL,
+    extract_transverse_force_series,
+    extract_transverse_displacement_series,
+    normalized_model_dicts,
+)
 try:
     import mplcursors
     _MPLCURSORS = True
@@ -524,6 +532,11 @@ def build_figure_grillage(nodes, members, edge_dist=0.0, selected_girder="All"):
     -------
     fig : matplotlib.figure.Figure
     """
+    # The unified Transverse Members selection keeps the full mesh in the
+    # grillage overview (transverse members are shown by show_transverse).
+    if selected_girder == TRANSVERSE_MEMBERS_LABEL:
+        selected_girder = "All"
+
     fig = Figure(figsize=(14, 6), dpi=110, facecolor="white")
     ax  = fig.add_subplot(111, projection="3d", facecolor="white")
 
@@ -650,10 +663,21 @@ def build_figure_grillage(nodes, members, edge_dist=0.0, selected_girder="All"):
 # SFD PLOT
 # =============================================================================
 
-def build_figure_sfd(ds, force_key, nodes, members, edge_dist=0.0, eng_scale=1.0, selected_girder="All"):
+def build_figure_sfd(ds, force_key, nodes, members, edge_dist=0.0, eng_scale=1.0, selected_girder="All", result_data=None, loadcase=None):
     """
     Build a 3-D matplotlib figure showing the Shear Force Diagram.
+
+    When *selected_girder* is ``"Transverse Members"`` and a restructured
+    result dictionary is supplied, the diagram shows the unified transverse
+    component (End Diaphragms + Intermediate Cross Bracings) instead —
+    data extraction routes through results_data.py.
     """
+    if selected_girder == TRANSVERSE_MEMBERS_LABEL and result_data is not None and loadcase:
+        return build_figure_transverse_members(
+            result_data, loadcase, force_key, nodes, members,
+            edge_dist=edge_dist, eng_scale=eng_scale, diagram_kind="force",
+        )
+
     v_scale = _value_plot_scale(eng_scale)
     comp_i_name, comp_j_name = FORCE_MAP[force_key]
     disp_key = FORCE_DISPLAY.get(force_key, force_key)
@@ -897,7 +921,7 @@ def build_figure_sfd(ds, force_key, nodes, members, edge_dist=0.0, eng_scale=1.0
 # BMD PLOT
 # =============================================================================
 
-def build_figure_bmd(ds, force_key, nodes, members, edge_dist=0.0, eng_scale=1.0, selected_girder="All"):
+def build_figure_bmd(ds, force_key, nodes, members, edge_dist=0.0, eng_scale=1.0, selected_girder="All", result_data=None, loadcase=None):
     """
     Build a 3-D matplotlib figure showing the Bending Moment Diagram.
 
@@ -1287,10 +1311,20 @@ def build_figure_bmd(ds, force_key, nodes, members, edge_dist=0.0, eng_scale=1.0
 # DEFLECTION PLOT
 # =============================================================================
 
-def build_figure_deflection(ds, disp_key, nodes, members, edge_dist=0.0, eng_scale=1.0, selected_girder="All"):
+def build_figure_deflection(ds, disp_key, nodes, members, edge_dist=0.0, eng_scale=1.0, selected_girder="All", result_data=None, loadcase=None):
     """
     Build a 3-D matplotlib figure showing the Deflection Diagram.
+
+    When *selected_girder* is ``"Transverse Members"`` and a restructured
+    result dictionary is supplied, the diagram shows the transverse-member
+    deflections instead — data extraction routes through results_data.py.
     """
+    if selected_girder == TRANSVERSE_MEMBERS_LABEL and result_data is not None and loadcase:
+        return build_figure_transverse_members(
+            result_data, loadcase, disp_key, nodes, members,
+            edge_dist=edge_dist, eng_scale=eng_scale, diagram_kind="deflection",
+        )
+
     v_scale = _value_plot_scale(eng_scale)
     comp_name  = DISP_MAP[disp_key]
     disp_label = DISP_DISPLAY.get(disp_key, disp_key)
@@ -1549,6 +1583,290 @@ def build_figure_deflection(ds, disp_key, nodes, members, edge_dist=0.0, eng_sca
     ax.grid(True, linestyle="--", linewidth=0.4, alpha=0.5)
     _add_coordinate_triad(ax, nodes, eng_scale=v_scale)
     ax.set_axis_off()
+    return fig, summary_data
+
+
+# =============================================================================
+# TRANSVERSE MEMBERS PLOT (End Diaphragms + Intermediate Cross Bracings)
+# =============================================================================
+
+def build_figure_transverse_members(
+    result_data,
+    loadcase,
+    key,
+    nodes,
+    members,
+    edge_dist=0.0,
+    eng_scale=1.0,
+    diagram_kind="force",
+):
+    """
+    Build a 3-D matplotlib figure for the unified Transverse Members
+    component (Task III): End Diaphragms + Intermediate Cross Bracings as a
+    single component (diagonals/chords are never separated).
+
+    All data integration routes through
+    ``osdagbridge.core.bridge_types.plate_girder.results_data`` —
+    ``extract_transverse_force_series`` /
+    ``extract_transverse_displacement_series`` — whose node/element mapping
+    distinguishes the transverse element tags from the longitudinal tags
+    via the OpenSeesPy/ospgrillage output dictionary.
+
+    Parameters
+    ----------
+    result_data : dict
+        Restructured output dictionary (restructure_data() result).
+    loadcase : str
+        Selected load case name.
+    key : str
+        Force key (``"Fx"``, ``"Fy"``, ``"Fz"``, ``"Mx"`` (torsion Tx),
+        ``"My"``, ``"Mz"``) for ``diagram_kind="force"``, or displacement
+        key (``"Dx"``, ``"Dy"``, ``"Dz"``) for ``diagram_kind="deflection"``.
+    nodes : dict
+        ``{tag: [x, y, z]}`` node coordinates.
+    members : dict
+        ``{tag: [n1, n2]}`` element connectivity.
+    edge_dist : float
+        Deck overhang (m) — unused for geometry, kept for API symmetry.
+    eng_scale : float
+        Engineering diagram scale (0 = flat diagram).
+    diagram_kind : str
+        ``"force"`` or ``"deflection"``.
+
+    Returns
+    -------
+    tuple
+        ``(fig, summary_data)`` — summary_data maps each girder pair
+        (``"G1-G2"`` …) to ``{"max": float, "min": float}`` in kN / kNm
+        (forces) or mm (deflections).
+    """
+    v_scale = _value_plot_scale(eng_scale)
+
+    if diagram_kind == "deflection":
+        comp_stem = DISP_MAP.get(key, str(key).lower())       # "Dy" → "dy"
+        disp_label = DISP_DISPLAY.get(key, key)
+        value_unit = "mm"
+        series = extract_transverse_displacement_series(
+            result_data, loadcase, comp_stem,
+        )
+        title_prefix = "Deflection Diagram"
+        line_color = "#6A1B9A"   # matches the girder deflection diagram
+    else:
+        comp_stem = FORCE_MAP[key][0][:-2]                     # "Vy_i" → "Vy"
+        disp_label = FORCE_DISPLAY.get(key, key)
+        value_unit = "kNm" if key.startswith("M") else "kN"
+        series = extract_transverse_force_series(
+            result_data, loadcase, comp_stem,
+        )
+        title_prefix = (
+            "Bending Moment Diagram" if key.startswith("M")
+            else "Shear Force Diagram"
+        )
+        line_color = "#1565C0" if key.startswith("F") else "#C62828"
+
+    fig = Figure(figsize=(14, 6), dpi=110, facecolor="white")
+    ax  = fig.add_subplot(111, projection="3d", facecolor="white")
+
+    # Normalise to the int-keyed live-model convention — the background /
+    # support helpers index the nodes table with the member connectivity
+    # tags (``nodes[members[e][0]]``).
+    nodes, members = normalized_model_dicts(nodes, members)
+
+    all_xs = [coord[0] for coord in nodes.values()]
+    all_zs = [coord[2] for coord in nodes.values()]
+    x_range = max(all_xs) - min(all_xs) or 1.0
+    z_range = max(all_zs) - min(all_zs) or 1.0
+    ax.set_xlim(min(all_xs), max(all_xs))
+    ax.set_ylim(min(all_zs), max(all_zs))
+
+    # Full grillage background with the transverse members visible —
+    # they ARE the selected component.
+    _add_grillage_background(
+        ax, nodes, members,
+        show_transverse=True,
+        include_edge_longitudinals=True,
+        include_end_transverse=True,
+        show_inner_nodes=False,
+    )
+
+    # ── Reduce the per-chain series to plotting points ────────────────────
+    def _coord(node_tag):
+        """Node coordinate lookup tolerating int/str key conventions."""
+        if node_tag in nodes:
+            return nodes[node_tag]
+        return nodes.get(str(node_tag))
+
+    def _conn(elem_tag):
+        """Element connectivity lookup tolerating int/str key conventions."""
+        if elem_tag in members:
+            return members[elem_tag]
+        return members.get(str(elem_tag))
+
+    stem_x, stem_z, stem_vals, hover_texts = [], [], [], []
+    summary_data = {}
+
+    for entry in series:
+        tag = entry["member"]
+        conn = _conn(tag)
+        if not conn or len(conn) < 2:
+            continue
+        c1, c2 = _coord(conn[0]), _coord(conn[1])
+        if c1 is None or c2 is None:
+            continue
+        z_mid = (c1[2] + c2[2]) / 2.0
+
+        if diagram_kind == "deflection":
+            vals = [entry.get("value_start"), entry.get("value_end")]
+            vals = [v for v in vals if v is not None]
+            if not vals:
+                continue
+            # Engineering sign flip for vertical sag (matches girder plots)
+            real = -max(vals, key=abs) * 1000.0            # m → mm
+        else:
+            v_i, v_j = entry.get("value_i"), entry.get("value_j")
+            if v_i is None and v_j is None:
+                continue
+            real = (v_i if v_i is not None else v_j) / 1000.0   # N → kN
+
+        pair = f"{entry['left_girder']}-{entry['right_girder']}"
+        stats = summary_data.setdefault(pair, {"max": real, "min": real})
+        stats["max"] = max(stats["max"], real)
+        stats["min"] = min(stats["min"], real)
+
+        stem_x.append(entry["x"])
+        stem_z.append(z_mid)
+        stem_vals.append(real)
+        hover_texts.append(
+            f"{entry['kind']} {tag}\nPair {pair}\nX: {entry['x']:.2f} m\n"
+            f"{disp_label}: {real:.3f} {value_unit}"
+        )
+
+    # ── Draw the transverse members themselves (highlighted) ──────────────
+    for entry in series:
+        conn = _conn(entry["member"])
+        if not conn or len(conn) < 2:
+            continue
+        c1, c2 = _coord(conn[0]), _coord(conn[1])
+        if c1 is None or c2 is None:
+            continue
+        is_diaphragm = entry["kind"] == END_DIAPHRAGM_LABEL
+        ax.plot(
+            [c1[0], c2[0]], [c1[2], c2[2]], [0, 0],
+            color="#EF6C00" if is_diaphragm else "#90AF13",
+            linewidth=2.5 if is_diaphragm else 1.8,
+            alpha=0.95, zorder=4,
+        )
+
+    global_vmin = 0.0
+    global_vmax = 0.0
+
+    if stem_vals:
+        vals_geom = np.array(stem_vals) * v_scale
+        global_vmin = float(np.min(vals_geom))
+        global_vmax = float(np.max(vals_geom))
+
+        xs_arr = np.array(stem_x)
+        zs_arr = np.array(stem_z)
+
+        # Ordinate stems + value points
+        for xi, zi, vg in zip(xs_arr, zs_arr, vals_geom):
+            ax.plot([xi, xi], [zi, zi], [0, vg],
+                    color=line_color, linewidth=1.2, alpha=0.7, zorder=3)
+
+        ax.plot(xs_arr, zs_arr, vals_geom,
+                color=line_color, linewidth=2.0, zorder=4,
+                marker="o", markersize=4)
+
+        sc = ax.scatter(xs_arr, zs_arr, vals_geom,
+                        color=line_color, s=30, zorder=5, depthshade=False)
+
+        # Extreme value markers + labels (per component, across all pairs)
+        idx_max = int(np.argmax(np.array(stem_vals)))
+        idx_min = int(np.argmin(np.array(stem_vals)))
+        for idx, gid_tag in ((idx_max, "max_line"), (idx_min, "min_line")):
+            ax.plot([xs_arr[idx]], [zs_arr[idx]], [vals_geom[idx]],
+                    marker="o", markersize=9, color="black",
+                    markeredgecolor="white", markeredgewidth=1.5,
+                    linestyle="None", zorder=10, gid=gid_tag)
+            ax.text(
+                xs_arr[idx], zs_arr[idx], vals_geom[idx],
+                f" {stem_vals[idx]:.3f} {value_unit}",
+                color="black", fontsize=7, fontweight="bold",
+                ha="left", va="bottom", zorder=11, gid=gid_tag,
+                bbox=dict(boxstyle="round,pad=0.2", facecolor="white",
+                          alpha=0.8, edgecolor="none"),
+            )
+
+        # Hover annotations (mirrors the girder builders)
+        if _MPLCURSORS:
+            cursor = mplcursors.cursor([sc], hover=True)
+            fig._custom_cursor = cursor
+            fig._hover_timers = {}
+
+            @cursor.connect("add")
+            def on_add(sel, _texts=hover_texts):
+                sel.annotation.set_text(_texts[sel.index])
+                sel.annotation.get_bbox_patch().set(
+                    fc="white", alpha=0.9, edgecolor="#BBBBBB"
+                )
+                sel_id = id(sel)
+                if sel_id in fig._hover_timers:
+                    fig._hover_timers[sel_id].stop()
+                timer = fig.canvas.new_timer(interval=3000)
+                timer.single_shot = True
+                fig._hover_timers[sel_id] = timer
+
+                def auto_hide():
+                    try:
+                        sel.annotation.set_visible(False)
+                        fig.canvas.draw_idle()
+                    except Exception:
+                        pass
+                    finally:
+                        fig._hover_timers.pop(sel_id, None)
+
+                timer.add_callback(auto_hide)
+                timer.start()
+
+    # Supports at the girder lines (full bridge context)
+    _add_supports(ax, nodes, members, edge_dist=edge_dist, selected_girder="All")
+    _add_node_number_labels(ax, nodes)
+    _add_element_number_labels(ax, nodes, members)
+
+    ax.set_xlabel("Span Length (m)", fontsize=10, labelpad=8)
+    ax.set_ylabel("Bridge Width (m)", fontsize=10, labelpad=8)
+    ax.set_zlabel(f"{disp_label} ({value_unit})", fontsize=10, labelpad=8)
+    _set_value_axis_tick_formatter(ax, v_scale)
+    zmin = min(0.0, global_vmin)
+    zmax = max(0.0, global_vmax)
+    z_span = max(1e-9, zmax - zmin)
+    pad = max(1e-6, 0.05 * z_span)
+    ax.set_zlim(zmin - pad, zmax + pad)
+    ax.set_box_aspect(aspect=(2.5, 1.2, max(v_scale, 1e-6)))
+    fig._eng_scale = v_scale
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=4, steps=[1, 2, 2.5, 5, 10]))
+
+    ax.set_title(
+        f"{title_prefix}  —  {TRANSVERSE_MEMBERS_LABEL}  —  {disp_label} ({value_unit})",
+        fontsize=12, fontweight="bold", pad=12,
+    )
+    ax.view_init(elev=DEFAULT_ELEV, azim=DEFAULT_AZIM)
+    ax.xaxis.pane.fill = False
+    ax.yaxis.pane.fill = False
+    ax.zaxis.pane.fill = False
+    ax.xaxis.pane.set_edgecolor("#555555")
+    ax.yaxis.pane.set_edgecolor("#555555")
+    ax.zaxis.pane.set_edgecolor("#555555")
+    ax.xaxis.pane.set_linewidth(1.5)
+    ax.yaxis.pane.set_linewidth(1.5)
+    ax.zaxis.pane.set_linewidth(1.5)
+    ax.xaxis.pane.set_alpha(1.0)
+    ax.yaxis.pane.set_alpha(1.0)
+    ax.zaxis.pane.set_alpha(1.0)
+    ax.grid(True, linestyle="--", linewidth=0.4, alpha=0.5)
+    _add_coordinate_triad(ax, nodes, eng_scale=v_scale)
+    ax.set_axis_off()
+
     return fig, summary_data
 
 

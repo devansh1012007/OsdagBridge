@@ -14,6 +14,7 @@ from collections import OrderedDict
 from collections.abc import Mapping
 from pathlib import Path
 
+import numpy as np
 import openseespy.opensees as ops
 
 from .results_data_post_processing import post_process, FORCE_KEEP, DISP_KEEP
@@ -979,6 +980,519 @@ def build_forces_summary(result_handler, load_effects_cache: dict) -> dict:
         }
 
     return {"load_cases": lc_summary, "reactions": rxn_summary}
+
+
+# =============================================================================
+#   TRANSVERSE MEMBERS — End Diaphragms + Intermediate Cross Bracings
+# =============================================================================
+#
+#   Result-plotting data integration for the transverse members of the
+#   grillage (Task III).  Everything below operates on the *restructured
+#   output dictionary* produced by restructure_data()/post_process() — the
+#   OpenSeesPy/ospgrillage results — so it is testable without a live model.
+#
+#   "Transverse Members" is a SINGLE plotting component that unifies:
+#     * End Diaphragms            — start_edge/end_edge elements running
+#                                   between two adjacent girders at the
+#                                   supports (x ≈ 0 and x ≈ span), and
+#     * Intermediate Cross Bracings — the transverse members between two
+#                                   adjacent girders at intermediate
+#                                   stations (result_data["crossbracings"]).
+#   Diagonals and chords are deliberately NOT separated: the grillage models
+#   the bracing lines as single transverse members and the design layer
+#   (CrossBracingForces) resolves the diagonal/chord split analytically.
+# =============================================================================
+
+#: Label of the unified transverse component shown in member-selection
+#: dropdowns (single component — never split into sub-members).
+TRANSVERSE_MEMBERS_LABEL = "Transverse Members"
+
+#: Annotation-only kind labels (never used as separate plot components).
+END_DIAPHRAGM_LABEL = "End Diaphragm"
+INTERMEDIATE_BRACING_LABEL = "Intermediate Cross Bracing"
+
+#: Force components pulled for the transverse plots.  Keys use the brief's
+#: naming (Fx/Vy/Vz/Tx/My/Mz); values are the ospgrillage dataset component
+#: stems (Tx is the torsion moment, stored as Mx).
+TRANSVERSE_FORCE_COMPONENTS = {
+    "Fx": "Vx",
+    "Vy": "Vy",
+    "Vz": "Vz",
+    "Tx": "Mx",
+    "My": "My",
+    "Mz": "Mz",
+}
+
+#: Displacement components pulled for the transverse plots (deflections).
+#: ospgrillage stores static displacements under "x"/"y"/"z"; "d*" is the
+#: graph-engine naming (see _get_displacements_df).
+TRANSVERSE_DISP_ALIASES = {"dx": "x", "dy": "y", "dz": "z"}
+
+#: Length tolerance (m) for the longitudinal/transverse geometric split.
+_ORIENTATION_TOL = 1e-3
+
+
+def classify_longitudinal_transverse(nodes, members, tol: float = _ORIENTATION_TOL):
+    """
+    Geometrically split element tags into longitudinal and transverse sets.
+
+    A member is *longitudinal* when both end nodes share the same Y and Z
+    coordinates (it runs along the bridge X axis — a girder / edge beam).
+    Everything else (varying Z across the width or varying Y vertically) is
+    *transverse*.
+
+    Parameters
+    ----------
+    nodes : dict
+        ``{node_tag: [x, y, z]}`` — the output dictionary's ``nodes`` table.
+    members : dict
+        ``{element_tag: [n1, n2]}`` — the output dictionary's ``members`` table.
+    tol : float
+        Coordinate tolerance (m).
+
+    Returns
+    -------
+    tuple[set[int], set[int]]
+        ``(longitudinal_tags, transverse_tags)`` — disjoint by construction.
+    """
+    longitudinal: set = set()
+    transverse: set = set()
+    for tag, conn in (members or {}).items():
+        if not conn or len(conn) < 2:
+            continue
+        # Node tags may be ints or strings depending on the producer —
+        # normalise to str for the nodes-table lookup.
+        n1, n2 = str(conn[0]), str(conn[1])
+        if n1 not in nodes or n2 not in nodes:
+            continue
+        c1, c2 = nodes[n1], nodes[n2]
+        if (abs(c1[1] - c2[1]) < tol) and (abs(c1[2] - c2[2]) < tol):
+            longitudinal.add(int(tag))
+        else:
+            transverse.add(int(tag))
+    return longitudinal, transverse
+
+
+def normalized_model_dicts(nodes, members) -> tuple:
+    """
+    Int-keyed copies of the nodes/members tables, tolerating both producer
+    conventions.
+
+    The live-model readers (``build_nodes_members`` /
+    ``_build_nodes_members``) build ``{int tag: ...}`` tables, while
+    :func:`restructure_data` re-keys them as strings.  Plot helpers that
+    index one table with tags taken from the other (``nodes[members[e][0]]``)
+    need a single convention — this normaliser provides it.
+
+    Keys that cannot be coerced to ``int`` are passed through unchanged, and
+    member connectivity entries keep their original value when non-numeric,
+    so no information is ever dropped.
+    """
+    nodes_n: dict = {}
+    for k, v in (nodes or {}).items():
+        try:
+            nodes_n[int(k)] = v
+        except (TypeError, ValueError):
+            nodes_n[k] = v
+
+    members_n: dict = {}
+    for k, conn in (members or {}).items():
+        try:
+            members_n[int(k)] = [
+                int(n) if str(n).lstrip("-").isdigit() else n
+                for n in (conn or [])
+            ]
+        except (TypeError, ValueError):
+            members_n[k] = list(conn or [])
+    return nodes_n, members_n
+
+
+def longitudinal_element_tags(result_data: dict) -> set:
+    """
+    Tags of the longitudinal members (girders / edge beams) per the
+    restructured output dictionary.
+
+    Uses ``result_data["girders"]`` (the BFS girder map built by
+    post-processing) and falls back to the geometric classification when no
+    girder map is present.
+    """
+    tags: set = set()
+    for g_data in (result_data.get("girders") or {}).values():
+        for m in (g_data.get("members") or []):
+            try:
+                tags.add(int(m))
+            except (TypeError, ValueError):
+                continue
+    if tags:
+        return tags
+    nodes = result_data.get("nodes") or {}
+    members = result_data.get("members") or {}
+    longitudinal, _transverse = classify_longitudinal_transverse(nodes, members)
+    return longitudinal
+
+
+def _girder_node_sets(result_data: dict) -> dict:
+    """``{girder_name: set(node_tags)}`` from the output dictionary."""
+    sets: dict = {}
+    for g_name, g_data in (result_data.get("girders") or {}).items():
+        sets[g_name] = {int(n) for n in (g_data.get("nodes") or [])}
+    return sets
+
+
+def _chain_x_station(result_data: dict, member_tag) -> float:
+    """Mean X coordinate (m) of a member's end nodes — its span station."""
+    members = result_data.get("members") or {}
+    nodes = result_data.get("nodes") or {}
+    conn = members.get(str(member_tag))
+    if not conn or len(conn) < 2:
+        return float("nan")
+    xs = []
+    for n in conn[:2]:
+        coord = nodes.get(str(n))
+        if coord:
+            xs.append(float(coord[0]))
+    return sum(xs) / len(xs) if xs else float("nan")
+
+
+def get_transverse_member_chains(result_data: dict) -> list:
+    """
+    Unified list of transverse member chains (End Diaphragms + Intermediate
+    Cross Bracings) extracted from the restructured output dictionary.
+
+    Each returned entry is a dict::
+
+        {
+            "members":       [<element tag>, ...],   # single member per chain
+            "kind":          "End Diaphragm" | "Intermediate Cross Bracing",
+            "x_station":     <float, m along the span>,
+            "left_girder":   "G1",
+            "right_girder":  "G2",
+            "nodes":         (n_left, n_right),
+        }
+
+    End diaphragms are the transverse elements at the support edges whose
+    both end nodes land on two *different* girders but which are not part of
+    the intermediate bracing set (result_data["crossbracings"]).  Chains are
+    sorted by ``(x_station, left girder index)`` for deterministic ordering.
+    """
+    chains: list = []
+
+    members = result_data.get("members") or {}
+    girder_sets = _girder_node_sets(result_data)
+    girder_index = {
+        g_name: g_data.get("index", 0)
+        for g_name, g_data in (result_data.get("girders") or {}).items()
+    }
+
+    def _find_girder(node):
+        for g_name, node_set in girder_sets.items():
+            if node in node_set:
+                return g_name
+        return None
+
+    # ── Intermediate Cross Bracings (already enriched by post_process) ─────
+    bracing_tags: set = set()
+    for chain in result_data.get("crossbracings") or []:
+        mems = chain.get("members") or []
+        if not mems:
+            continue
+        left = chain.get("left_girder")
+        right = chain.get("right_girder")
+        if left is None or right is None:
+            continue
+        tag = mems[0]
+        try:
+            tag_int = int(tag)
+        except (TypeError, ValueError):
+            continue
+        bracing_tags.add(tag_int)
+        conn = members.get(str(tag)) or [None, None]
+        chains.append({
+            "members": [tag_int],
+            "kind": INTERMEDIATE_BRACING_LABEL,
+            "x_station": _chain_x_station(result_data, tag),
+            "left_girder": left,
+            "right_girder": right,
+            "nodes": (conn[0], conn[1]) if len(conn) >= 2 else (None, None),
+        })
+
+    # ── End Diaphragms (support-edge elements between adjacent girders) ────
+    for tag_str, conn in members.items():
+        try:
+            tag_int = int(tag_str)
+        except (TypeError, ValueError):
+            continue
+        if tag_int in bracing_tags or not conn or len(conn) < 2:
+            continue
+        n1, n2 = conn[0], conn[1]
+        g1 = _find_girder(n1)
+        g2 = _find_girder(n2)
+        # Only transverse members between two DIFFERENT girders qualify —
+        # slab overhangs (edge-beam to girder) and longitudinal members do not.
+        if g1 is None or g2 is None or g1 == g2:
+            continue
+        if girder_index.get(g1, 0) <= girder_index.get(g2, 0):
+            left, right, n_left, n_right = g1, g2, n1, n2
+        else:
+            left, right, n_left, n_right = g2, g1, n2, n1
+        chains.append({
+            "members": [tag_int],
+            "kind": END_DIAPHRAGM_LABEL,
+            "x_station": _chain_x_station(result_data, tag_str),
+            "left_girder": left,
+            "right_girder": right,
+            "nodes": (n_left, n_right),
+        })
+
+    # Drop chains without a resolvable station and sort deterministically.
+    chains = [c for c in chains if c["x_station"] == c["x_station"]]
+    chains.sort(key=lambda c: (c["x_station"], girder_index.get(c["left_girder"], 0)))
+    return chains
+
+
+def transverse_element_tags(result_data: dict) -> set:
+    """
+    Tags of ALL transverse members (end diaphragms + intermediate cross
+    bracings) per the output dictionary.  Disjoint from
+    :func:`longitudinal_element_tags` by construction (transverse chains
+    connect two different girder lines; longitudinal members lie on one).
+    """
+    tags: set = set()
+    for chain in get_transverse_member_chains(result_data):
+        tags.update(chain["members"])
+    return tags
+
+
+def extract_transverse_force_series(result_data: dict, loadcase, component: str) -> list:
+    """
+    Per-chain internal-force series for the selected load case.
+
+    Parameters
+    ----------
+    result_data : dict
+        Restructured output dictionary (restructure_data() result).
+    loadcase : str
+        Load case name (key of result_data["forces"]).
+    component : str
+        Force component stem — ``"Vx"``, ``"Vy"``, ``"Vz"``, ``"Mx"``
+        (torsion Tx), ``"My"`` or ``"Mz"``.
+
+    Returns
+    -------
+    list[dict]
+        One entry per transverse chain, sorted by station::
+
+            {"x": station_m, "member": tag, "value_i": N, "value_j": N,
+             "kind": ..., "left_girder": ..., "right_girder": ...}
+
+        Values are in the stored units (N / N·mm); consumers convert to
+        kN / kNm.  Missing entries are skipped.
+    """
+    forces = result_data.get("forces") or {}
+    lc_table = forces.get(str(loadcase)) or {}
+    comp_i, comp_j = f"{component}_i", f"{component}_j"
+
+    series: list = []
+    for chain in get_transverse_member_chains(result_data):
+        tag = str(chain["members"][0])
+        row = lc_table.get(tag)
+        if not isinstance(row, dict):
+            continue
+        v_i, v_j = row.get(comp_i), row.get(comp_j)
+        if v_i is None and v_j is None:
+            continue
+        series.append({
+            "x": chain["x_station"],
+            "member": chain["members"][0],
+            "value_i": v_i,
+            "value_j": v_j,
+            "kind": chain["kind"],
+            "left_girder": chain["left_girder"],
+            "right_girder": chain["right_girder"],
+        })
+    return series
+
+
+def extract_transverse_displacement_series(result_data: dict, loadcase, component: str) -> list:
+    """
+    Per-chain nodal displacement (deflection) series for the selected load case.
+
+    Parameters
+    ----------
+    result_data : dict
+        Restructured output dictionary.
+    loadcase : str
+        Load case name (key of result_data["displacements"]).
+    component : str
+        ``"dx"`` / ``"dy"`` / ``"dz"`` (aliased to the stored ``"x"/"y"/"z"``).
+
+    Returns
+    -------
+    list[dict]
+        One entry per transverse chain, sorted by station::
+
+            {"x": station_m, "member": tag, "node_start": n, "node_end": n,
+             "value_start": m, "value_end": m, "kind": ...}
+
+        Values are in the stored units (m); consumers convert to mm.
+    """
+    disp = result_data.get("displacements") or {}
+    lc_table = disp.get(str(loadcase)) or {}
+    ds_key = TRANSVERSE_DISP_ALIASES.get(str(component), str(component))
+
+    series: list = []
+    for chain in get_transverse_member_chains(result_data):
+        n_left, n_right = chain["nodes"]
+        row_l = lc_table.get(str(n_left)) if n_left is not None else None
+        row_r = lc_table.get(str(n_right)) if n_right is not None else None
+        if not isinstance(row_l, dict) and not isinstance(row_r, dict):
+            continue
+        v_l = row_l.get(ds_key) if isinstance(row_l, dict) else None
+        v_r = row_r.get(ds_key) if isinstance(row_r, dict) else None
+        if v_l is None and v_r is None:
+            continue
+        series.append({
+            "x": chain["x_station"],
+            "member": chain["members"][0],
+            "node_start": n_left,
+            "node_end": n_right,
+            "value_start": v_l,
+            "value_end": v_r,
+            "kind": chain["kind"],
+            "left_girder": chain["left_girder"],
+            "right_girder": chain["right_girder"],
+        })
+    return series
+
+
+def _governing(values) -> float:
+    """Value with the largest magnitude (sign preserved); 0.0 when empty."""
+    vals = [float(v) for v in values if v is not None]
+    if not vals:
+        return 0.0
+    return max(vals, key=abs)
+
+
+def extract_transverse_member_results(
+    result_data: dict,
+    loadcase,
+    bmd_key: str = "Mz_i",
+    sfd_key: str = "Vy_i",
+    defl_component: str = "dy",
+):
+    """
+    Mirrors ``GirderGraphEngine.extract_member_results`` for the unified
+    Transverse Members component (Task III).
+
+    Pulls the internal forces Fx, Vy, Vz, Tx (Mx), My, Mz and the nodal
+    deflections for the selected load case, reduced to one governing
+    ordinate per bracing/diaphragm station along the span.
+
+    Parameters
+    ----------
+    result_data : dict
+        Restructured output dictionary (restructure_data() result).
+    loadcase : str
+        Selected load case name.
+    bmd_key : str
+        Component key for the moment trace (default ``"Mz_i"``).
+    sfd_key : str
+        Component key for the shear trace (default ``"Vy_i"``).
+    defl_component : str
+        Deflection component (default ``"dy"``).
+
+    Returns
+    -------
+    tuple or None
+        ``(xs, bmd_values, sfd_values, defl_values, all_data)`` where
+        ``xs`` holds the station positions (m), forces are in kN / kNm,
+        deflections in mm, and ``all_data`` maps every component —
+        ``"Fx_i"``, ``"Vy_i"``, ``"Vz_i"``, ``"Mx_i"``, ``"My_i"``,
+        ``"Mz_i"`` plus the brief's naming ``"Fx"``, ``"Vy"``, ``"Vz"``,
+        ``"Tx"``, ``"My"``, ``"Mz"`` and ``"dx"``/``"dy"``/``"dz"`` — to
+        station arrays.  Returns ``None`` when no transverse data exists.
+    """
+    chains = get_transverse_member_chains(result_data)
+    if not chains:
+        return None
+
+    forces = result_data.get("forces") or {}
+    lc_forces = forces.get(str(loadcase)) or {}
+    disp = result_data.get("displacements") or {}
+    lc_disp = disp.get(str(loadcase)) or {}
+
+    # station → list of per-chain ordinates, per component
+    per_station: dict = {}
+
+    def _record(station, key, value):
+        if value is None:
+            return
+        per_station.setdefault(round(float(station), 6), {}).setdefault(key, []).append(
+            float(value)
+        )
+
+    for chain in chains:
+        tag = str(chain["members"][0])
+        row = lc_forces.get(tag)
+        if isinstance(row, dict):
+            for plot_key, comp_stem in TRANSVERSE_FORCE_COMPONENTS.items():
+                v_i = row.get(f"{comp_stem}_i")
+                v_j = row.get(f"{comp_stem}_j")
+                # /1000 → kN (forces) or kNm (moments), as stored in N / N·mm
+                if v_i is not None:
+                    _record(chain["x_station"], f"{plot_key}_i", float(v_i) / 1000.0)
+                if v_j is not None:
+                    _record(chain["x_station"], f"{plot_key}_j", float(v_j) / 1000.0)
+        n_left, n_right = chain["nodes"]
+        for n in (n_left, n_right):
+            if n is None:
+                continue
+            drow = lc_disp.get(str(n))
+            if not isinstance(drow, dict):
+                continue
+            for d_plot, d_stored in TRANSVERSE_DISP_ALIASES.items():
+                v = drow.get(d_stored)
+                if v is not None:
+                    # ×1000 → mm, as stored in m
+                    _record(chain["x_station"], d_plot, float(v) * 1000.0)
+
+    if not per_station:
+        return None
+
+    stations = sorted(per_station.keys())
+    xs = np.array(stations, dtype=float)
+
+    all_data: dict = {}
+
+    # Force components — brief naming (Fx/Vy/Vz/Tx/My/Mz) uses the i-node
+    # value (member start, left girder); the *_i keys keep compute_maximums()
+    # compatibility.  j-node values are exposed as *_j_global (negated to the
+    # global sense, matching GirderGraphEngine._smooth_nodal's convention).
+    for plot_key, _comp_stem in TRANSVERSE_FORCE_COMPONENTS.items():
+        i_vals = [
+            _governing(per_station[s].get(f"{plot_key}_i")) for s in stations
+        ]
+        arr = np.array(i_vals, dtype=float)
+        all_data[f"{plot_key}_i"] = np.nan_to_num(arr)
+        all_data[plot_key] = all_data[f"{plot_key}_i"]
+        j_vals = [
+            _governing(
+                [-v for v in per_station[s].get(f"{plot_key}_j", [])]
+            )
+            for s in stations
+        ]
+        all_data[f"{plot_key}_j_global"] = np.nan_to_num(np.array(j_vals, dtype=float))
+
+    # Deflections (mm)
+    for d_plot in TRANSVERSE_DISP_ALIASES:
+        d_vals = [_governing(per_station[s].get(d_plot)) for s in stations]
+        all_data[d_plot] = np.nan_to_num(np.array(d_vals, dtype=float))
+
+    bmd_values = all_data.get(bmd_key, np.zeros_like(xs))
+    sfd_values = all_data.get(sfd_key, np.zeros_like(xs))
+    defl_values = all_data.get(defl_component, np.zeros_like(xs))
+
+    return xs, bmd_values, sfd_values, defl_values, all_data
 
 
 def _dump(data: dict, filename: str = "bridge_plot_data.json") -> None:

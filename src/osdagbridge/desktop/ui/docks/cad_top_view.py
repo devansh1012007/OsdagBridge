@@ -6,9 +6,17 @@ Author: Arushi
 from osdagbridge.core.utils.common import *
 import math
 from PySide6.QtWidgets import QWidget, QPushButton, QScrollArea
-from PySide6.QtCore import Qt, QRectF, QPointF, QTimer, QSize
+from PySide6.QtCore import Qt, QRectF, QPointF, QTimer, QSize, Signal
 from PySide6.QtGui import QPainter, QPen, QColor, QFont, QBrush, QPolygonF, QIcon
 from .cad_cross_section import CrossSectionCADWidget
+from osdagbridge.desktop.ui.docks.cad_param_editor import (
+    get_cad_label_edit_mixin,
+)
+
+# Mixin providing double-click dimension-label editing (Task I).
+# Qt signals cannot be declared inside a plain mixin, so they are declared
+# on the widget class below and referenced by the mixin via duck typing.
+_CadLabelEditMixin = get_cad_label_edit_mixin()
 
 # ---- CAD Grey Palette ----
 CAD_DARK_GREY   = QColor(90, 90, 90)
@@ -25,9 +33,17 @@ DIM_STACK_GAP = 28         # vertical gap between stacked dimensions
 LEADER_TEXT_OFFSET = 25    # leader label distance
 
 
-class TopViewCADWidget(QWidget):
+class TopViewCADWidget(_CadLabelEditMixin, QWidget):
     """Widget for drawing bridge top view"""
-    
+
+    # ── Interactive CAD parameter editing (Task I) ─────────────────────
+    # Emitted as (input KEY, new value text) when the user commits an edit
+    # in the inline label editor. Validation / dict update / redraw happen
+    # in the owner (template page), keeping this widget stateless.
+    parameter_edit_requested = Signal(str, str)
+    # Emitted when a locked (derived) dimension label is double-clicked.
+    locked_parameter_clicked = Signal(str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.show_dimensions = True
@@ -109,6 +125,10 @@ class TopViewCADWidget(QWidget):
             'rail_count': 3,
             'width': 100,
         }
+
+        # Double-click label editing state (disabled until the owning dual
+        # CAD view switches it on).
+        self._init_cad_editing(enabled=False)
     
     def setup_zoom_controls(self):
         """Create zoom controls inside the widget"""
@@ -477,9 +497,13 @@ class TopViewCADWidget(QWidget):
             self.hovered_top_view_element = new_hovered
             self.update()
 
+        # Hover feedback for double-click editable dimension labels (Task I)
+        self._update_cad_edit_cursor(pos)
+
     def paintEvent(self, event):
-        # clear hover zones at start of each paint
+        # clear hover zones and dimension-label hit zones at start of each paint
         self.top_view_hover_zones = []
+        self._dim_label_zones = []
         
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
@@ -489,7 +513,8 @@ class TopViewCADWidget(QWidget):
         
     def draw_text_with_background(self, painter, x, y, text,
                               bg_color=QColor(255, 255, 255, 230), 
-                              text_color=QColor(0, 0, 0), font_size=9, bold=False):
+                              text_color=QColor(0, 0, 0), font_size=9, bold=False,
+                              param_key=None):
 
         # defensive check: font size must be > 0
         font_size = max(1, font_size)
@@ -526,7 +551,12 @@ class TopViewCADWidget(QWidget):
         for i, line in enumerate(lines):
             painter.drawText(int(x), int(first_line_y + i * line_height), line)
 
-    
+        # Register the label rect for double-click editing (Task I)
+        if param_key is not None:
+            self._register_dim_label(bg_rect, param_key)
+
+        return bg_rect
+
     def draw_dimension_arrow(self, painter, x1, y1, x2, y2, text, horizontal=True, offset=0, text_offset=0, draw_extensions=True, extension_direction='down', extension_end_y=None):
         """dimension line with arrows and text with extension lines"""
         painter.setPen(QPen(QColor(0, 0, 0), 0.8))
@@ -1282,7 +1312,8 @@ class TopViewCADWidget(QWidget):
             
             self.draw_dimension_arrow_with_extensions_up(
                 painter, x1_brace, dim_y1, x2_brace, dim_y1,
-                label_cb, last_girder_y
+                label_cb, last_girder_y,
+                param_key=KEY_MP_CB_SPACING,   # locked (derived) — read-only via CAD
             )
             dim_y_next = dim_y_base + DIM_STACK_GAP
         else:
@@ -1299,7 +1330,8 @@ class TopViewCADWidget(QWidget):
         
         self.draw_dimension_arrow_with_extensions_up(
             painter, x1_span, dim_y2, x2_span, dim_y2,
-            label_span, last_girder_y
+            label_span, last_girder_y,
+            param_key=KEY_SPAN,           # editable — synced back to the main inputs
         )
 
         # GIRDER SPACING dimension (always visible)
@@ -1334,7 +1366,8 @@ class TopViewCADWidget(QWidget):
                 painter, label_x, label_y,
                 label_text,
                 QColor(255, 255, 255, 240),
-                QColor(0, 0, 0), 9, False
+                QColor(0, 0, 0), 9, False,
+                param_key=KEY_TS_GIRDER_SPACING,   # editable — synced back to the main inputs
             )
 
         # CL OF BEARING labels - ALWAYS VISIBLE (moved outside hover condition)
@@ -1410,7 +1443,7 @@ class TopViewCADWidget(QWidget):
             self.draw_clean_leader_line(painter, target_x, target_y, label_x, label_y,
                                     "End Diaphragm", CAD_DARK_GREY, QColor(139, 69, 19))
 
-    def draw_dimension_arrow_with_extensions_up(self, painter, x1, y1, x2, y2, text, girder_y):
+    def draw_dimension_arrow_with_extensions_up(self, painter, x1, y1, x2, y2, text, girder_y, param_key=None):
         """Dimension line with arrows and extension lines going UP to girder level (dimension below)"""
         painter.setPen(QPen(QColor(0, 0, 0), 1.0))
         
@@ -1462,7 +1495,8 @@ class TopViewCADWidget(QWidget):
         text_width = metrics.boundingRect(text).width()
         
         self.draw_text_with_background(painter, text_x - text_width/2, text_y, text, 
-                                    QColor(255, 255, 255, 240), QColor(0, 0, 0), 9, False)
+                                    QColor(255, 255, 255, 240), QColor(0, 0, 0), 9, False,
+                                    param_key=param_key)
 
 
     def draw_skewed_dimension_arrow(self, painter, x1, y1, x2, y2, text, skew_rad):

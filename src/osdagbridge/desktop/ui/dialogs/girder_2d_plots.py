@@ -102,13 +102,18 @@ class Girder2DPlotsWidget(QWidget):
         top_layout = QHBoxLayout()
         top_layout.setAlignment(Qt.AlignLeft)
 
-        lbl1 = QLabel("Girder Element:")
+        lbl1 = QLabel("Member:")
         font = QFont()
         font.setBold(True)
         lbl1.setFont(font)
-        
+
         self.girder_combo = create_combo_box()
         self.girder_combo.setMinimumWidth(100)
+        self.girder_combo.setToolTip(
+            "Longitudinal members (girders) plus the unified "
+            "'Transverse Members' component (End Diaphragms + Intermediate "
+            "Cross Bracings)."
+        )
         self.girder_combo.currentTextChanged.connect(self._on_girder_selected)
         self.girder_combo.setEnabled(False) 
 
@@ -258,7 +263,7 @@ class Girder2DPlotsWidget(QWidget):
         engine : GirderGraphEngine
             The fully initialised engine.  Must already have a result handler
             injected; if result_handler is None on the engine,
-            ``get_girder_keys()`` will return an empty list and the widget
+            ``get_member_keys()`` will return an empty list and the widget
             will display the blank state with a logged warning.
         loadcase : str
             Load case name passed to ``engine.extract_member_results()``.
@@ -274,10 +279,13 @@ class Girder2DPlotsWidget(QWidget):
         self._loadcase = loadcase
         self._reset_state()
 
-        girders = self._engine.get_girder_keys()
-        if not girders:
+        # Member selection (Task III): girder keys plus the unified
+        # "Transverse Members" component (End Diaphragms + Intermediate
+        # Cross Bracings) when transverse result data is available.
+        members = self._engine.get_member_keys()
+        if not members:
             logger.warning(
-                "set_engine: engine.get_girder_keys() returned an empty list. "
+                "set_engine: engine.get_member_keys() returned an empty list. "
                 "result_handler may be uninitialised or the model contains no "
                 "continuous girders.  Showing blank state."
             )
@@ -288,7 +296,7 @@ class Girder2DPlotsWidget(QWidget):
 
         self.girder_combo.blockSignals(True)
         self.girder_combo.clear()
-        self.girder_combo.addItems(girders)
+        self.girder_combo.addItems(members)
         self.girder_combo.blockSignals(False)
         self.girder_combo.setEnabled(True)
 
@@ -318,17 +326,18 @@ class Girder2DPlotsWidget(QWidget):
 
     def _on_girder_selected(self, girder_name: str) -> None:
         """
-        Slot — called when the user picks a different girder from the combo.
+        Slot — called when the user picks a different member from the combo.
 
-        Extracts force arrays for the selected girder and re-renders all
-        diagram panels.  Silently returns if no engine is injected or the
-        girder name is empty.
+        Extracts force arrays for the selected member (a girder, or the
+        unified "Transverse Members" component) and re-renders all diagram
+        panels.  Silently returns if no engine is injected or the member
+        name is empty.
 
         Parameters
         ----------
         girder_name : str
-            Girder identifier as returned by ``engine.get_girder_keys()``,
-            e.g. ``"G1"`` or ``"EB1"``.
+            Member identifier as returned by ``engine.get_member_keys()``,
+            e.g. ``"G1"``, ``"EB1"`` or ``"Transverse Members"``.
         """
         if not girder_name or self._engine is None:
             return
@@ -337,11 +346,11 @@ class Girder2DPlotsWidget(QWidget):
         if res is None:
             logger.warning(
                 "_on_girder_selected: extract_member_results returned None "
-                "for girder=%r, loadcase=%r.",
+                "for member=%r, loadcase=%r.",
                 girder_name, self._loadcase,
             )
             self._engine.show_blank_state(
-                self.canvas, f"No data for girder {girder_name!r}."
+                self.canvas, f"No data for member {girder_name!r}."
             )
             return
 
@@ -351,8 +360,14 @@ class Girder2DPlotsWidget(QWidget):
         self._sfd_data  = np.asarray(sfd_array)
         self._defl_data = np.asarray(defl_array)
         self._all_data  = all_data
-        self._reactions = self._engine.extract_reactions(self._loadcase, girder_name)
-        self._loads     = self._engine.extract_loads(self._loadcase)
+        # Reactions / girder load overlays only exist for longitudinal
+        # members — the transverse component renders without them.
+        if self._engine.is_transverse_member_key(girder_name):
+            self._reactions = None
+            self._loads     = None
+        else:
+            self._reactions = self._engine.extract_reactions(self._loadcase, girder_name)
+            self._loads     = self._engine.extract_loads(self._loadcase)
 
         self._plot_current_data()
 

@@ -18,6 +18,9 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
 from osdagbridge.core.bridge_types.plate_girder.graph_engine import GirderGraphEngine
+from osdagbridge.core.bridge_types.plate_girder.results_data import (
+    TRANSVERSE_MEMBERS_LABEL,
+)
 from osdagbridge.core.utils.common import DESIGN_CHECK_ORDER
 
 # Prefix used to identify non-selectable category header items in combo boxes.
@@ -587,6 +590,11 @@ class SteelDesign(QDialog):
         if self._checks_ran and not self._dcr_dirty:
             return
 
+        # Design checks (DCR) are defined per girder — the unified
+        # Transverse Members component has no girder design checks.
+        if self._is_transverse_selection():
+            return
+
         try:
             backend = getattr(self._main_window, "backend", None)
             if backend is None:
@@ -748,7 +756,8 @@ class SteelDesign(QDialog):
 
     def _populate_member_combo(self):
         """
-        Populate the member dropdown with human-readable girder names.
+        Populate the member dropdown with human-readable girder names plus
+        the unified Transverse Members component (Task III).
 
         The first and last girders in the traversal order are edge beams —
         dummy girders required only for analysis calculations, never shown to
@@ -756,6 +765,9 @@ class SteelDesign(QDialog):
         renumbered sequentially starting at 1 for display. The raw girder key
         is preserved as the item's userData so all downstream lookups (plots,
         design checks) continue to resolve against the original analysis model.
+
+        "Transverse Members" (End Diaphragms + Intermediate Cross Bracings as
+        a single component) is appended when transverse result data exists.
         """
         combo = self.member_combo
         combo.blockSignals(True)
@@ -767,7 +779,18 @@ class SteelDesign(QDialog):
 
         for display_idx, key in enumerate(interior_keys, start=1):
             combo.addItem(f"Girder {display_idx}", userData=key)
+
+        # Unified transverse component (Task III) — appended after girders.
+        if self.graph_engine._has_transverse_results():
+            combo.addItem(TRANSVERSE_MEMBERS_LABEL, userData=TRANSVERSE_MEMBERS_LABEL)
+
         combo.blockSignals(False)
+
+    def _is_transverse_selection(self) -> bool:
+        """True when the member dropdown currently selects Transverse Members."""
+        combo = self.member_combo
+        member_key = combo.currentData() or combo.currentText()
+        return self.graph_engine.is_transverse_member_key(member_key)
 
     # ── Category-header helper ────────────────────────────────────────────────
     @staticmethod
@@ -946,7 +969,12 @@ class SteelDesign(QDialog):
 
         # ── Append support reactions to dict ──────────────────────────────────
         try:
-            if len(sfd_values) >= 2:
+            # Girder support reactions only — the Transverse Members
+            # component has no girder supports.
+            if (
+                len(sfd_values) >= 2
+                and not engine.is_transverse_member_key(member_key)
+            ):
                 # The first value is the shear strictly at the left support (x=0)
                 # The second-to-last value is the shear at the right support (x=L) 
                 # (since the very last value at index -1 was padded with 0.0)
@@ -980,17 +1008,19 @@ class SteelDesign(QDialog):
 
         # ── Gather reactions for scheme label overlay ─────────────────────────────
         _reactions = None
-        try:
-            _reactions = engine.extract_reactions(loadcase, member_key)
-        except Exception:
-            pass  # Non-fatal: scheme renders without reaction labels
+        if not engine.is_transverse_member_key(member_key):
+            try:
+                _reactions = engine.extract_reactions(loadcase, member_key)
+            except Exception:
+                pass  # Non-fatal: scheme renders without reaction labels
 
         # ── Gather load descriptors for scheme load overlay ───────────────────────
         _loads = None
-        try:
-            _loads = engine.extract_loads(loadcase) or None
-        except Exception:
-            pass  # Non-fatal: scheme renders without load overlays
+        if not engine.is_transverse_member_key(member_key):
+            try:
+                _loads = engine.extract_loads(loadcase) or None
+            except Exception:
+                pass  # Non-fatal: scheme renders without load overlays
 
         engine.render_plots(
             xs, bmd_values, sfd_values, self.canvas,

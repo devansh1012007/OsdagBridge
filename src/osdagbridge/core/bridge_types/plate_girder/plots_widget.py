@@ -416,6 +416,143 @@ def build_figure_bmd(ds, force_key, nodes, members):
 
 
 # ============================================================
+# TRANSVERSE MEMBERS (End Diaphragms + Intermediate Cross Bracings)
+# ============================================================
+def build_figure_transverse_members(result_data, loadcase, force_key, nodes, members):
+    """
+    Plotly figure for the unified Transverse Members component (Task III).
+
+    End Diaphragms + Intermediate Cross Bracings are plotted as a single
+    component (diagonals/chords are never separated).  All data integration
+    routes through
+    ``osdagbridge.core.bridge_types.plate_girder.results_data.extract_transverse_force_series``
+    which distinguishes the transverse element tags from the longitudinal
+    tags via the OpenSeesPy/ospgrillage output dictionary.
+
+    Parameters
+    ----------
+    result_data : dict
+        Restructured output dictionary (restructure_data() result).
+    loadcase : str
+        Selected load case name.
+    force_key : str
+        One of FORCE_MAP keys — "Fx", "Fy", "Fz", "Mx" (torsion Tx),
+        "My", "Mz".
+    nodes : dict
+        {tag: [x, y, z]} node coordinates.
+    members : dict
+        {tag: [n1, n2]} element connectivity.
+
+    Returns
+    -------
+    str
+        JSON-serialised plotly figure (same contract as build_figure_sfd).
+    """
+    from osdagbridge.core.bridge_types.plate_girder.results_data import (
+        TRANSVERSE_MEMBERS_LABEL,
+        END_DIAPHRAGM_LABEL,
+        extract_transverse_force_series,
+        normalized_model_dicts,
+    )
+
+    comp_i_name, comp_j_name = FORCE_MAP[force_key]
+    comp_stem = comp_i_name[:-2]     # "Vy_i" → "Vy"
+    unit = "kNm" if force_key.startswith("M") else "kN"
+
+    series = extract_transverse_force_series(result_data, loadcase, comp_stem)
+
+    # Normalise to the int-keyed live-model convention — the background
+    # helpers index the nodes table with the member connectivity tags.
+    nodes, members = normalized_model_dicts(nodes, members)
+
+    def _coord(node_tag):
+        """Node coordinate lookup tolerating int/str key conventions."""
+        if node_tag in nodes:
+            return nodes[node_tag]
+        return nodes.get(str(node_tag))
+
+    def _conn(elem_tag):
+        """Element connectivity lookup tolerating int/str key conventions."""
+        if elem_tag in members:
+            return members[elem_tag]
+        return members.get(str(elem_tag))
+
+    fig = go.Figure()
+    add_grillage_background(fig, nodes, members)
+    add_coordinate_triad(fig, nodes)
+
+    master_stem_x, master_stem_y, master_stem_z = [], [], []
+    master_pt_x, master_pt_y, master_pt_z = [], [], []
+    master_hover_text = []
+    summary_data = {}
+
+    for entry in series:
+        conn = _conn(entry["member"])
+        if not conn or len(conn) < 2:
+            continue
+        c1, c2 = _coord(conn[0]), _coord(conn[1])
+        if c1 is None or c2 is None:
+            continue
+        z_mid = (c1[2] + c2[2]) / 2.0
+
+        v_i, v_j = entry.get("value_i"), entry.get("value_j")
+        if v_i is None and v_j is None:
+            continue
+        val_kn = (v_i if v_i is not None else v_j) / 1000.0
+
+        pair = f"{entry['left_girder']}-{entry['right_girder']}"
+        stats = summary_data.setdefault(pair, {"max": val_kn, "min": val_kn})
+        stats["max"] = max(stats["max"], val_kn)
+        stats["min"] = min(stats["min"], val_kn)
+
+        # Highlight the transverse member on the deck plane
+        is_diaphragm = entry["kind"] == END_DIAPHRAGM_LABEL
+        fig.add_trace(go.Scatter3d(
+            x=[c1[0], c2[0]], y=[0, 0], z=[c1[2], c2[2]], mode="lines",
+            line=dict(color="#EF6C00" if is_diaphragm else "#90AF13",
+                      width=6 if is_diaphragm else 4),
+            hoverinfo="skip", showlegend=False,
+        ))
+
+        # Ordinate stem + value point
+        master_stem_x.extend([entry["x"], entry["x"], None])
+        master_stem_z.extend([z_mid, z_mid, None])
+        master_stem_y.extend([0, val_kn, None])
+
+        master_pt_x.append(entry["x"])
+        master_pt_y.append(val_kn)
+        master_pt_z.append(z_mid)
+        master_hover_text.append(
+            f"{entry['kind']} {entry['member']}<br>Pair {pair}<br>"
+            f"X = {entry['x']:.2f}<br>{force_key} = {val_kn:.3f} {unit}"
+        )
+
+    fig.add_trace(go.Scatter3d(
+        x=master_stem_x, y=master_stem_y, z=master_stem_z, mode="lines",
+        line=dict(color="blue", width=4), hoverinfo="skip", showlegend=False,
+    ))
+    fig.add_trace(go.Scatter3d(
+        x=master_pt_x, y=master_pt_y, z=master_pt_z, mode="markers",
+        marker=dict(color="blue", size=6),
+        text=master_hover_text, hoverinfo="text", showlegend=False,
+    ))
+
+    fig.update_layout(
+        uirevision="constant_view",
+        hoverlabel=dict(bgcolor="#E6F2FF", font_size=12, font_color="#2C3E50",
+                        bordercolor="#BBD6EE", namelength=-1),
+        scene=SHARED_SCENE,
+        margin=dict(l=0, r=0, t=40, b=0),
+        paper_bgcolor="white", plot_bgcolor="white",
+        title=dict(
+            text=f"{TRANSVERSE_MEMBERS_LABEL}  —  {force_key} ({unit})",
+            font=dict(size=14),
+        ),
+    )
+    return fig.to_json()
+
+
+# ============================================================
 # BMD CONTOUR  (commented out — kept for reference)
 # ============================================================
 # def build_figure_bmd_contour(ds, force_key, nodes, members):

@@ -859,15 +859,37 @@ class OutputDock(QWidget):
 
         # 2. Update Analysis Member dropdown
         from osdagbridge.core.utils.common import KEY_ANALYSIS_MEMBER
+        from osdagbridge.core.bridge_types.plate_girder.results_data import (
+            TRANSVERSE_MEMBERS_LABEL,
+        )
         combo_analysis = self._w(KEY_ANALYSIS_MEMBER)
         if combo_analysis is not None:
             combo_analysis.blockSignals(True)
             combo_analysis.clear()
-            combo_analysis.addItems(["All"] + items)
+            # "Transverse Members" (End Diaphragms + Intermediate Cross
+            # Bracings, single component) — offered when the analysis
+            # produced transverse result data.
+            analysis_items = ["All"] + items
+            if self._backend_has_transverse_results():
+                analysis_items.append(TRANSVERSE_MEMBERS_LABEL)
+            combo_analysis.addItems(analysis_items)
             combo_analysis.setCurrentIndex(0)
             combo_analysis.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
             combo_analysis.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
             combo_analysis.blockSignals(False)
+
+    def _backend_has_transverse_results(self) -> bool:
+        """True when the backend exposes non-empty transverse member results."""
+        try:
+            from osdagbridge.core.bridge_types.plate_girder.results_data import (
+                get_transverse_member_chains,
+            )
+            result_data = getattr(self.backend, "result_data", None)
+            if not result_data:
+                return False
+            return bool(get_transverse_member_chains(result_data))
+        except Exception:
+            return False
    
     def connect_design_dropdowns(self):
         """Connect Member and Load Case dropdowns to refresh DCR bars on change."""

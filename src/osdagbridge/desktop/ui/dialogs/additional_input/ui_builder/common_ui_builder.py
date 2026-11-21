@@ -1514,7 +1514,12 @@ class UIBuilder(QWidget):
                 ai.working_input_dict[widget_id] = val
                 w = current_widget.findChild(QLineEdit, widget_id)
                 if w:
+                    # Programmatic refresh — block signals so the write is not
+                    # mistaken for a user edit (it would otherwise mark the
+                    # dialog modified on every open via _on_field_editing).
+                    w.blockSignals(True)
                     w.setText(str(val))
+                    w.blockSignals(False)
 
         # ── Connect tab change signal ──────────────────────────────────────────
         # Triggered whenever user switches tabs

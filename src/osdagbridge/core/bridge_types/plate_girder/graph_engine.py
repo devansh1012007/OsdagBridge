@@ -48,6 +48,9 @@ import numpy as np
 from osdagbridge.core.bridge_types.plate_girder.analysis_results import (
     PlateGirderAnalysisResults,
 )
+from osdagbridge.core.bridge_types.plate_girder.results_data import (
+    TRANSVERSE_MEMBERS_LABEL,
+)
 
 # =============================================================================
 #   PENDING API  —  items required from analysis_results.py
@@ -683,6 +686,57 @@ class GirderGraphEngine:
             logger.warning("_call_classify_loadcases() failed: %s", exc, exc_info=True)
             return None
 
+    def _call_transverse_results(
+        self,
+        load_case: str,
+        bmd_key: str = "Mz_i",
+        sfd_key: str = "Vy_i",
+        defl_component: str = "dy",
+    ):
+        """
+        Fetch the unified Transverse Members result series (Task III).
+
+        End Diaphragms + Intermediate Cross Bracings are extracted as a
+        single component.  The call routes through the result handler's
+        ``_get_transverse_member_results`` which delegates to
+        ``results_data.extract_transverse_member_results`` — the node/element
+        mapping there distinguishes transverse element tags from
+        longitudinal tags via the OpenSeesPy/ospgrillage output dictionary.
+
+        Parameters
+        ----------
+        load_case : str
+            Load case name as stored in the dataset.
+        bmd_key : str
+            Component key for the moment trace (default ``"Mz_i"``).
+        sfd_key : str
+            Component key for the shear trace (default ``"Vy_i"``).
+        defl_component : str
+            Deflection component (default ``"dy"``).
+
+        Returns
+        -------
+        tuple or None
+            ``(xs, bmd_values, sfd_values, defl_values, all_data)`` with
+            stations in m, forces in kN/kNm and deflections in mm, or
+            ``None`` when no transverse data is available.
+        """
+        try:
+            if not self._require_handler("_call_transverse_results"):
+                return None
+            return self._result_handler._get_transverse_member_results(
+                load_case,
+                bmd_key=bmd_key,
+                sfd_key=sfd_key,
+                defl_component=defl_component,
+            )
+        except Exception as exc:
+            logger.warning(
+                "_call_transverse_results(lc=%r) failed: %s", load_case, exc,
+                exc_info=True,
+            )
+            return None
+
     def _call_displacements(
         self, load_case: str, girder: str, component: str
     ):
@@ -1023,6 +1077,50 @@ class GirderGraphEngine:
             return []
         return df["Girder"].tolist()
 
+    def get_member_keys(self) -> list[str]:
+        """
+        Return the member-selection keys for the plotting UIs (Task III).
+
+        The list contains every girder key (longitudinal members, traversal
+        order) followed by the unified transverse component label
+        ``"Transverse Members"`` (End Diaphragms + Intermediate Cross
+        Bracings as a single component — never split into diagonals/chords).
+
+        Returns
+        -------
+        list[str]
+            Girder names plus ``TRANSVERSE_MEMBERS_LABEL``.  The transverse
+            entry is appended only when transverse result data is available.
+        """
+        keys = list(self.get_girder_keys())
+        if self._has_transverse_results():
+            keys.append(TRANSVERSE_MEMBERS_LABEL)
+        return keys
+
+    def is_transverse_member_key(self, member_key: str) -> bool:
+        """True when *member_key* selects the unified transverse component."""
+        return str(member_key) == TRANSVERSE_MEMBERS_LABEL
+
+    def _has_transverse_results(self) -> bool:
+        """True when the handler exposes non-empty transverse result data."""
+        try:
+            if not self._require_handler("_has_transverse_results"):
+                return False
+            handler = self._result_handler
+            if not hasattr(handler, "_get_transverse_member_results"):
+                return False
+            result_data = getattr(
+                getattr(handler, "bridge", None), "result_data", None
+            )
+            if not result_data:
+                return False
+            from osdagbridge.core.bridge_types.plate_girder.results_data import (
+                get_transverse_member_chains,
+            )
+            return bool(get_transverse_member_chains(result_data))
+        except Exception:
+            return False
+
     def get_classified_loadcases(self) -> dict:
         """
         Return load cases grouped by category.
@@ -1058,12 +1156,17 @@ class GirderGraphEngine:
     #   PUBLIC API — RESULT EXTRACTION
     # =========================================================================
 
-    def extract_reactions(self, load_case: str, girder_key: str) -> dict:
+    def extract_reactions(self, load_case: str, girder_key: str):
         """
         Return {'Ra': float, 'Rb': float} in kN for the given load case and girder.
         Extracts directly from the real model reactions via _call_reactions(),
         falling back to the SFD boundaries if extraction fails.
+
+        The unified Transverse Members component has no girder supports —
+        ``{'Ra': None, 'Rb': None}`` is returned for it.
         """
+        if self.is_transverse_member_key(girder_key):
+            return {"Ra": None, "Rb": None}
         try:
             df = self._call_reactions(load_case, girder_key)
             if df is not None and not df.empty:
@@ -1126,8 +1229,30 @@ class GirderGraphEngine:
             array is a ``np.ndarray``.  Units: xs in metres, forces in kN/kNm,
             deflection in mm.
             Returns ``None`` on any failure.
+
+        Notes
+        -----
+        When *member_key* equals ``"Transverse Members"`` the extraction is
+        routed through ``_call_transverse_results`` (results_data.py):
+        ``xs`` then holds the bracing/diaphragm stations along the span and
+        the arrays hold the governing transverse-member ordinates.
         """
         try:
+            if self.is_transverse_member_key(member_key):
+                result = self._call_transverse_results(
+                    loadcase, bmd_key=bmd_key, sfd_key=sfd_key,
+                )
+                if result is None:
+                    return None
+                xs, bmd_values, sfd_values, defl_values, all_data = result
+                return (
+                    np.asarray(xs),
+                    np.asarray(bmd_values),
+                    np.asarray(sfd_values),
+                    np.asarray(defl_values),
+                    all_data,
+                )
+
             result = self._build_force_arrays(loadcase, member_key, bmd_key, sfd_key)
             if result is None:
                 return None

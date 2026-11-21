@@ -174,6 +174,9 @@ class MplPlotWidget(QWidget):
         self._edge_dist = 0.0
         self._output_dock = None
         self._summary_data = {}
+        # Restructured result dictionary (results_data.restructure_data)
+        # — required for the "Transverse Members" plot selection (Task III).
+        self._result_data = None
 
         # Display States
         self._grillage_mode = False
@@ -341,6 +344,7 @@ class MplPlotWidget(QWidget):
         self._members   = {}
         self._output_dock = None
         self._summary_data = {}
+        self._result_data = None
         self._cb_max = None
         self._cb_min = None
 
@@ -407,12 +411,20 @@ class MplPlotWidget(QWidget):
                     pass
 
     def setup(self, ds_all, loadcases: list, nodes: dict, members: dict,
-              edge_dist: float = 0.0):
+              edge_dist: float = 0.0, result_data: dict | None = None):
+        """Populate the widget with bridge analysis results. Call after design() completes.
+
+        ``result_data`` is the restructured OpenSeesPy/ospgrillage output
+        dictionary (``backend.result_data``); it enables the "Transverse
+        Members" selection whose data extraction routes through
+        results_data.py.
+        """
         self._ds_all    = ds_all
         self._loadcases = list(loadcases)
         self._nodes     = nodes
         self._members   = members
         self._edge_dist = edge_dist
+        self._result_data = result_data
 
         if hasattr(self, '_fig') and self._fig.axes:
             ax = self._fig.axes[0]
@@ -542,19 +554,22 @@ class MplPlotWidget(QWidget):
             self._fig, self._summary_data = build_figure_sfd(
                 ds, force_key, self._nodes, self._members,
                 edge_dist=self._edge_dist, eng_scale=eng_scale,
-                selected_girder=sel_girder
+                selected_girder=sel_girder,
+                result_data=self._result_data, loadcase=loadcase,
             )
         elif force_key in _DEFL_KEYS:
             self._fig, self._summary_data = build_figure_deflection(
                 ds, force_key, self._nodes, self._members,
                 edge_dist=self._edge_dist, eng_scale=eng_scale,
-                selected_girder=sel_girder
+                selected_girder=sel_girder,
+                result_data=self._result_data, loadcase=loadcase,
             )
         else:
             self._fig, self._summary_data = build_figure_bmd(
                 ds, force_key, self._nodes, self._members,
                 edge_dist=self._edge_dist, eng_scale=eng_scale,
-                selected_girder=sel_girder
+                selected_girder=sel_girder,
+                result_data=self._result_data, loadcase=loadcase,
             )
 
         self._attach_figure(self._fig)
