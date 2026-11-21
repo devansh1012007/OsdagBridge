@@ -1,7 +1,22 @@
 from osdagbridge.core.reports.report_utils import _tex
+from osdagbridge.core.reports.styles import plain_table, ROW_END
 
 
 def ch1_project_info(m):
+    rows = "".join([
+        r"\textbf{Project Name} & " + _tex(m.project_name) + " " + ROW_END + r"\hline" + "\n",
+        r"\textbf{Project Location} & " + _tex(m.project_location) + " " + ROW_END + r"\hline" + "\n",
+        r"\textbf{Designer} & " + _tex(m.designer) + " " + ROW_END + r"\hline" + "\n",
+        r"\textbf{Reviewer} & " + _tex(m.reviewer) + " " + ROW_END + r"\hline" + "\n",
+        r"\textbf{Organization} & " + _tex(m.company) + " " + ROW_END + r"\hline" + "\n",
+        r"\textbf{Client} & " + _tex(m.client) + " " + ROW_END + r"\hline" + "\n",
+        r"\textbf{Software Version} & OsdagBridge " + ROW_END + r"\hline" + "\n",
+    ])
+    team_table = plain_table(
+        col_spec="|L{5.5cm}|L{8.5cm}|",
+        header=r"\textbf{Item} & \textbf{Details}",
+        body=rows)
+
     return r"""
 \chapter{Project Information}
 
@@ -10,23 +25,7 @@ This section records all project metadata as entered by the designer.
 \section{Project and Design Team Details}
 \label{sec:project-details}
 
-\begin{tabular}{|L{5.5cm}|L{8.5cm}|}
-\hline
-\textbf{Project Name} & """ + _tex(m.project_name) + r""" \\
-\hline
-\textbf{Project Location} & """ + _tex(m.project_location) + r""" \\
-\hline
-\textbf{Designer} & """ + _tex(m.designer) + r""" \\
-\hline
-\textbf{Reviewer} & """ + _tex(m.reviewer) + r""" \\
-\hline
-\textbf{Organization} & """ + _tex(m.company) + r""" \\
-\hline
-\textbf{Client} & """ + _tex(m.client) + r""" \\
-\hline
-\textbf{Software Version} & OsdagBridge \\
-\hline
-\end{tabular}
+""" + team_table + r"""
 
 
 \section{Applicable Codes and Standards}
@@ -44,5 +43,3 @@ This section records all project metadata as entered by the designer.
 \item Indian Standard (IS) 6006: Steel Bearings
 \end{itemize}
 """
-
-

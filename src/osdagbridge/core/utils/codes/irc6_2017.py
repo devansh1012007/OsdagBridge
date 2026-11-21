@@ -889,15 +889,20 @@ class IRC6_2017:
         """
         Returns braking force as per IRC:6-2017 Clause 211.2.
         Returns:
-            float: Braking force in t (rounded to 3 decimal places)
+            float: Braking force in N (rounded to 3 decimal places)
         """
+        # First two design lanes: 20% of the Class A wheeled train; every
+        # additional lane: 5% of a Class 70R wheeled train (Cl. 211.2).
+        # Wheel loads from cl_204_1_* are in N, so the result is in N.
+        braking_force_1 = 0.0
+        braking_force_2 = 0.0
         for lane in range(1, design_lanes + 1):
             if lane == 1 or lane == 2:
                 wheel_load = IRC6_2017.cl_204_1_ClassA_vehicle()['wheel_loads']
-                braking_force_1 = 0.20 * sum(wheel_load)  # t
+                braking_force_1 += 0.20 * sum(wheel_load)  # N
             if lane > 2:
                 wheel_load = IRC6_2017.cl_204_1_Class70R_vehicle_wheel()['wheel_loads']
-                braking_force_2 = 0.05 * sum(wheel_load)  # t
+                braking_force_2 += 0.05 * sum(wheel_load)  # N
             
             total_braking_force = braking_force_1 + braking_force_2
         return round(total_braking_force, 3)

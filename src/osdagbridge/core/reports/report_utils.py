@@ -15,6 +15,9 @@ def _tex(value):
     # that pdflatex cannot render.
     for uni, ascii_ in [('∠', 'L'), ('ⅹ', 'x'), ('×', 'x')]:
         s = s.replace(uni, ascii_)
+    # Math glyphs pdflatex cannot typeset in text mode with the default font.
+    for uni, tex_ in [('≤', r'$\leq$'), ('≥', r'$\geq$'), ('±', r'$\pm$')]:
+        s = s.replace(uni, tex_)
     s = s.replace('\\', r'\textbackslash{}')
     for ch, esc in [('&', r'\&'), ('%', r'\%'), ('$', r'\$'), ('#', r'\#'),
                     ('{', r'\{'), ('}', r'\}'),          
